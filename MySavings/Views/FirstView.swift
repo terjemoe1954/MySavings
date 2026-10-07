@@ -154,10 +154,10 @@ struct FirstView: View {
             }
         }
         .onAppear {
-            showDueUnpaid = true
-            showUnpaid = true
+            showDueUnpaid = false // true
+            showUnpaid = false //  true
             showAllPosts = true
-            showAllPosts = false
+          //  showAllPosts = false
         }
         .preferredColorScheme(darkModeEnabled ? .dark : .light)
     }
