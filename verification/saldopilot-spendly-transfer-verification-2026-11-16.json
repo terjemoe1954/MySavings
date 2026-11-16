@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-16",
+  "sourceOfTruth": "MySavings; original application data and supplied JSON were not modified",
+  "originalFile": {
+    "formatVersion": 4,
+    "transactions": 283,
+    "saldopilot": {
+      "created": 283,
+      "skipped": 0,
+      "repeatedMergeCreated": 0,
+      "reopenPreserved": 283,
+      "compared": "title, amounts at cent precision, due/paid/created/updated dates, status, completed/archived flags, mapped categories, notes and recurrence fields",
+      "result": "passed",
+      "rawFloatingPointNoiseRows": 9
+    },
+    "spendlyAI": {
+      "decoded": 283,
+      "skipped": 0,
+      "importedIntoIsolatedMemoryStore": 283,
+      "incomeAndExpenseSums": "exactly matched source decimal sums"
+    }
+  },
+  "codeChanges": [
+    "MySavings exports money rounded to øre while preserving prior IDs for unchanged source invoices",
+    "MySavings exports proper recurrence type and explicit month interval",
+    "Unknown source categories such as Loan are marked as custom for Saldopilot",
+    "MySavings reads both legacy and corrected recurrence metadata back",
+    "SpendlyAI reads explicit month intervals for recurring expenses"
+  ],
+  "syntheticChecks": [
+    "7-record old/new export roundtrip",
+    "unchanged legacy export IDs",
+    "no source amount mutation",
+    "monthly, quarterly, half-yearly, yearly and custom month interval",
+    "Saldopilot first and repeated merge plus reopen",
+    "SpendlyAI isolated import and exact income/expense totals"
+  ],
+  "builds": {
+    "MySavings": "passed unsigned local iOS build",
+    "SpendlyAI": "passed unsigned local iOS build"
+  },
+  "deployment": {
+    "Saldopilot": "1.9.1 (31) available in TestFlight",
+    "MySavingsExporter": "code only; not installed or published",
+    "SpendlyAIImporter": "code only; not installed or published"
+  },
+  "remainingLimits": [
+    "This is a transfer, not ongoing bidirectional synchronization",
+    "Existing MySavings export IDs still depend on mutable source fields; later changes can generate different IDs. Formatting fixes preserve the old identity calculation, but do not solve ongoing-update identity",
+    "SpendlyAI import does not deduplicate repeated imports",
+    "Saldopilot merge preserves existing rows and does not automatically apply corrected amounts or intervals to previously imported IDs",
+    "SpendlyAI has no arbitrary-month income recurrence; current supplied file has longer intervals only for expenses",
+    "The historical file contains monthly recurrence metadata for 22 expenses whose notes state 6 or 12 months; corrected future exports carry the actual interval"
+  ]
+}

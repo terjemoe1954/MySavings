@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -23,6 +24,7 @@ struct SaldoPilotBackupDocument: FileDocument {
     }
 }
 
+@MainActor
 enum SaldoPilotExporter {
     static func makeDocument(
         invoices: [Invoice],
@@ -32,6 +34,27 @@ enum SaldoPilotExporter {
         showName: Bool,
         showStatus: Bool
     ) throws -> SaldoPilotBackupDocument {
+        let previousIDs = invoices.map { ($0, $0.saldoPilotExportID, $0.saldoPilotExportSeriesID) }
+        var usedIDs = Set(invoices.compactMap { $0.saldoPilotExportID.flatMap(UUID.init(uuidString:))?.uuidString })
+        var seenPersistedIDs = Set<String>()
+        for invoice in invoices {
+            if let id = invoice.saldoPilotExportID, UUID(uuidString: id) != nil, seenPersistedIDs.insert(id.uppercased()).inserted {
+                invoice.saldoPilotExportID = id.uppercased()
+            } else {
+                let oldID = legacyID(for: invoice)
+                let id = usedIDs.insert(oldID).inserted ? oldID : UUID().uuidString
+                invoice.saldoPilotExportID = id
+                usedIDs.insert(id)
+            }
+        }
+        for invoice in invoices where invoice.interval > 0 && invoice.saldoPilotExportSeriesID == nil {
+            if invoice.saldoPilotExportID == legacyID(for: invoice) {
+                invoice.saldoPilotExportSeriesID = deterministicUUID(from: "series|" + legacyCanonical(for: invoice))
+            } else {
+                invoice.saldoPilotExportSeriesID = deterministicUUID(from: "series|" + invoice.saldoPilotExportID!)
+            }
+        }
+        do {
         let categoryRecords = makeCategories(customers: customers)
         let categoryIDs = Dictionary(
             uniqueKeysWithValues: categoryRecords.map { ($0.sourceName, $0.id) }
@@ -39,9 +62,10 @@ enum SaldoPilotExporter {
 
         let backup = SaldoPilotBackup(
             formatVersion: 4,
+            sourceApp: "MySavings",
             exportedAt: .now,
             categories: categoryRecords.map {
-                SaldoPilotCategory(id: $0.id, name: $0.sourceName, icon: "person")
+                SaldoPilotCategory(id: $0.id, name: $0.sourceName, icon: "person", isUserDefined: !isStandardCategory($0.sourceName))
             },
             transactions: invoices.map {
                 makeTransaction(invoice: $0, categoryIDs: categoryIDs)
@@ -68,7 +92,18 @@ enum SaldoPilotExporter {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return try SaldoPilotBackupDocument(data: encoder.encode(backup))
+        let document = try SaldoPilotBackupDocument(data: encoder.encode(backup))
+        var savedContexts = Set<ObjectIdentifier>()
+        for invoice in invoices {
+            if let context = invoice.modelContext, savedContexts.insert(ObjectIdentifier(context)).inserted {
+                try context.save()
+            }
+        }
+        return document
+        } catch {
+            for (invoice, id, seriesID) in previousIDs { invoice.saldoPilotExportID = id; invoice.saldoPilotExportSeriesID = seriesID }
+            throw error
+        }
     }
 
     static func suggestedFilename(date: Date = .now) -> String {
@@ -118,6 +153,15 @@ enum SaldoPilotExporter {
         return records
     }
 
+    private static func isStandardCategory(_ name: String) -> Bool {
+        let key = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "nb_NO"))
+            .filter { $0.isLetter || $0.isNumber }
+        return ["abonnementer", "abbonementer", "boligstrøm", "boligstrom", "dagligvarer", "forsikring",
+                "fritidferie", "gaver", "helse", "hobbyutvikling", "klær", "klaer", "klærsko", "klaersko",
+                "lønninntekt", "lonninntekt", "pengespill", "refusjon", "skattavgifter", "spiseute",
+                "telefoninternett", "transport", "underholdning", "annet", "other"].contains(key)
+    }
+
     private static func makeTransaction(
         invoice: Invoice,
         categoryIDs: [String: String]
@@ -125,19 +169,17 @@ enum SaldoPilotExporter {
         let customerName = invoice.customer?.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let categoryID = customerName.flatMap { categoryIDs[$0] } ?? "other"
         let completed = invoice.isPaid || invoice.state != .pending
-        let recurrence = invoice.interval > 0 ? "monthly" : "none"
-        let canonicalID = [
-            invoice.title,
-            invoice.type.rawValue,
-            invoice.state.rawValue,
-            amountString(invoice.amount),
-            invoice.dueDate.ISO8601Format(),
-            customerName ?? "",
-            String(invoice.interval)
-        ].joined(separator: "|")
-
+        let recurrence: String
+        switch invoice.interval {
+        case ...0: recurrence = "none"
+        case 1: recurrence = "monthly"
+        case 3: recurrence = "quarterly"
+        case 6: recurrence = "halfYearly"
+        case 12: recurrence = "yearly"
+        default: recurrence = "everyNMonths"
+        }
         return SaldoPilotTransaction(
-            id: deterministicUUID(from: canonicalID),
+            id: invoice.saldoPilotExportID!,
             title: invoice.title,
             amount: amountString(invoice.amount),
             type: invoice.type == .income ? "income" : "expense",
@@ -146,11 +188,12 @@ enum SaldoPilotExporter {
             dueDate: invoice.dueDate,
             paidDate: completed ? invoice.paidDate : nil,
             recurrence: recurrence,
+            recurrenceIntervalMonths: invoice.interval > 1 ? invoice.interval : nil,
             recurrenceAnchorDay: invoice.interval > 0
                 ? Calendar.current.component(.day, from: invoice.dueDate)
                 : nil,
             recurrenceSeriesID: invoice.interval > 0
-                ? deterministicUUID(from: "series|\(canonicalID)")
+                ? invoice.saldoPilotExportSeriesID
                 : nil,
             isCompleted: completed,
             isArchived: false,
@@ -160,6 +203,18 @@ enum SaldoPilotExporter {
             createdAt: invoice.dueDate,
             updatedAt: invoice.dueDate
         )
+    }
+
+    private static func legacyID(for invoice: Invoice) -> String {
+        deterministicUUID(from: legacyCanonical(for: invoice))
+    }
+
+    private static func legacyCanonical(for invoice: Invoice) -> String {
+        let name = invoice.customer?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let canonical = [invoice.title, invoice.type.rawValue, invoice.state.rawValue,
+                         legacyIdentityAmountString(invoice.amount), invoice.dueDate.ISO8601Format(),
+                         name, String(invoice.interval)].joined(separator: "|")
+        return canonical
     }
 
     private static func status(for invoice: Invoice) -> String {
@@ -174,6 +229,15 @@ enum SaldoPilotExporter {
     }
 
     private static func amountString(_ amount: Double) -> String {
+        // Convert the displayed decimal value, then round money to øre, without binary floating-point noise.
+        var value = Decimal(string: String(amount), locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(amount)
+        var rounded = Decimal.zero
+        NSDecimalRound(&rounded, &value, 2, .plain)
+        return NSDecimalNumber(decimal: rounded).stringValue
+    }
+
+    private static func legacyIdentityAmountString(_ amount: Double) -> String {
+        // Existing Saldopilot imports use this identity. Cleaning up amount formatting must not change it.
         NSDecimalNumber(decimal: Decimal(amount)).stringValue
     }
 
@@ -230,6 +294,7 @@ private struct CategoryRecord {
 
 private struct SaldoPilotBackup: Encodable {
     let formatVersion: Int
+    let sourceApp: String
     let exportedAt: Date
     let categories: [SaldoPilotCategory]
     let transactions: [SaldoPilotTransaction]
@@ -241,6 +306,7 @@ private struct SaldoPilotCategory: Encodable {
     let id: String
     let name: String
     let icon: String
+    let isUserDefined: Bool
 }
 
 private struct SaldoPilotTransaction: Encodable {
@@ -253,6 +319,7 @@ private struct SaldoPilotTransaction: Encodable {
     let dueDate: Date
     let paidDate: Date?
     let recurrence: String
+    let recurrenceIntervalMonths: Int?
     let recurrenceAnchorDay: Int?
     let recurrenceSeriesID: String?
     let isCompleted: Bool

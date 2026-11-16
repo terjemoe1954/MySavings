@@ -1,0 +1,14 @@
+{
+  "status": "passed",
+  "published": false,
+  "checks": [
+    "legacy unchanged IDs preserved",
+    "amount/title/date edits preserve ID and series",
+    "two identical recurring bills have separate IDs and series",
+    "IDs persist across reopening database",
+    "source monetary values not modified by export",
+    "exported amounts rounded to cents",
+    "all recurrence intervals round-trip",
+    "old local store migration preserves financial fields and relationships"
+  ]
+}

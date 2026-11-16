@@ -30,7 +30,9 @@ class Customer {
 
 @Model
 class Invoice {
-    // var id: UUID = UUID()
+    /// Permanent identity for transfers; independent of editable invoice fields.
+    var saldoPilotExportID: String?
+    var saldoPilotExportSeriesID: String?
     var title: String = ""
     var type: TransactionType = TransactionType.expense
     var state: TransactionState = TransactionState.pending

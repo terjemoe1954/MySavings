@@ -8,9 +8,11 @@
 import SwiftData
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Query private var invoices: [Invoice]
     @Query private var customers: [Customer]
 
@@ -22,6 +24,10 @@ struct SettingsView: View {
     @State private var exportFile: SaldoPilotExportFile?
     @State private var isPreparingExport = false
     @State private var exportErrorMessage: String?
+    @State private var showingRestorePicker = false
+    @State private var pendingRestore: SaldoPilotRestorePackage?
+    @State private var restoreErrorMessage: String?
+    @State private var restoreSuccessMessage: String?
 
     var body: some View {
         NavigationView {
@@ -54,6 +60,10 @@ struct SettingsView: View {
                     isPreparing: isPreparingExport,
                     exportAction: prepareSaldoPilotExport
                 )
+
+                SaldoPilotRestoreSection {
+                    showingRestorePicker = true
+                }
 
                 Section {
                     Link(destination: URL(string: Constants.web)!) {
@@ -93,6 +103,34 @@ struct SettingsView: View {
         .sheet(item: $exportFile) { file in
             SaldoPilotShareSheet(fileURL: file.url)
         }
+        .fileImporter(
+            isPresented: $showingRestorePicker,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false,
+            onCompletion: handleRestoreFile
+        )
+        .alert(
+            "Erstatt alle data?",
+            isPresented: Binding(
+                get: { pendingRestore != nil },
+                set: { if !$0 { pendingRestore = nil } }
+            )
+        ) {
+            Button("Avbryt", role: .cancel) {
+                pendingRestore = nil
+            }
+            Button("Slett og gjenopprett", role: .destructive) {
+                performRestore()
+            }
+        } message: {
+            if let pendingRestore {
+                Text(
+                    "\(pendingRestore.transactionCount) bilag og " +
+                    "\(pendingRestore.categoryCount) klienter vil erstatte alle data. " +
+                    "Endringen synkroniseres til iCloud."
+                )
+            }
+        }
         .alert(
             "Kunne ikke eksportere",
             isPresented: Binding(
@@ -103,6 +141,28 @@ struct SettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(exportErrorMessage ?? "")
+        }
+        .alert(
+            "Kunne ikke gjenopprette",
+            isPresented: Binding(
+                get: { restoreErrorMessage != nil },
+                set: { if !$0 { restoreErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(restoreErrorMessage ?? "")
+        }
+        .alert(
+            "Gjenoppretting fullført",
+            isPresented: Binding(
+                get: { restoreSuccessMessage != nil },
+                set: { if !$0 { restoreSuccessMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(restoreSuccessMessage ?? "")
         }
     }
 
@@ -128,6 +188,68 @@ struct SettingsView: View {
                 isPreparingExport = false
                 exportErrorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func handleRestoreFile(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else {
+                return
+            }
+
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let data = try Data(contentsOf: url)
+            pendingRestore = try SaldoPilotImporter.decode(data)
+        } catch {
+            restoreErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func performRestore() {
+        guard let package = pendingRestore else { return }
+
+        do {
+            try SaldoPilotImporter.replaceData(
+                with: package,
+                in: modelContext
+            )
+            name = package.settings.displayName
+            darkModeEnabled = package.settings.darkModeEnabled
+            showName = package.settings.showName
+            showStatus = package.settings.showStatus
+            pendingRestore = nil
+            restoreSuccessMessage =
+                "\(package.transactionCount) bilag og " +
+                "\(package.categoryCount) klienter er gjenopprettet. " +
+                "La appen være åpen mens iCloud synkroniserer."
+        } catch {
+            pendingRestore = nil
+            restoreErrorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct SaldoPilotRestoreSection: View {
+    let restoreAction: () -> Void
+
+    var body: some View {
+        Section {
+            Button(role: .destructive, action: restoreAction) {
+                Label("Gjenopprett fra backup", systemImage: "arrow.counterclockwise.icloud")
+            }
+        } header: {
+            Text("Gjenoppretting")
+        } footer: {
+            Text(
+                "Backupfilen kontrolleres før alle lokale data erstattes. " +
+                "Endringene synkroniseres til iCloud."
+            )
         }
     }
 }
