@@ -37,6 +37,7 @@ struct ListInvoiceView: View {
     @State private var reportShareURL: URL?
     @State private var showReportPreview = false
     @State private var reportPDFData: Data?
+    @State private var activeReportKind: ReportKind = .standard
     @AppStorage("showFilteredCustomer") var showFilteredCustomer = false
     let calendar = Calendar.current
     @State private var selectedCustomer: Customer?
@@ -216,14 +217,15 @@ struct ListInvoiceView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("Preview Report") {
-                            previewReport()
+                        Menu("Vanlig rapport") {
+                            Button("Forhåndsvis") { previewReport(kind: .standard) }
+                            Button("Skriv ut") { printReport(kind: .standard) }
+                            Button("Eksporter PDF") { exportReportPDF(kind: .standard) }
                         }
-                        Button("Print Report") {
-                            printReport()
-                        }
-                        Button("Export PDF") {
-                            exportReportPDF()
+                        Menu("Ubetalte i valgt periode") {
+                            Button("Forhåndsvis sjekkliste") { previewReport(kind: .unpaidChecklist) }
+                            Button("Skriv ut sjekkliste") { printReport(kind: .unpaidChecklist) }
+                            Button("Eksporter sjekkliste") { exportReportPDF(kind: .unpaidChecklist) }
                         }
                     } label: {
                         Label("Report", systemImage: "printer")
@@ -249,9 +251,9 @@ struct ListInvoiceView: View {
                 if let data = reportPDFData {
                     ReportPreviewView(
                         data: data,
-                        onPrint: { printReport() },
-                        onShare: { exportReportPDF() },
-                        onSaveToFiles: { saveReportToFiles() }
+                        onPrint: { printReport(kind: activeReportKind) },
+                        onShare: { exportReportPDF(kind: activeReportKind) },
+                        onSaveToFiles: { saveReportToFiles(kind: activeReportKind) }
                     )
                 } else {
                     Text("Could not create PDF.")
@@ -283,6 +285,35 @@ struct ListInvoiceView: View {
 
     private var reportInvoices: [Invoice] {
         showAllPosts == true && showFilteredCustomer == false ? showAllTransactions : displayTransactions
+    }
+
+    private enum ReportKind {
+        case standard
+        case unpaidChecklist
+    }
+
+    private var unpaidChecklistInvoices: [Invoice] {
+        let start = calendar.startOfDay(for: min(fromDate, toDate))
+        let end = calendar.startOfDay(for: max(fromDate, toDate))
+
+        return transactions
+            .filter { invoice in
+                let dueDay = calendar.startOfDay(for: invoice.dueDate)
+                return invoice.type == .expense
+                    && invoice.state == .pending
+                    && dueDay >= start
+                    && dueDay <= end
+            }
+            .sorted { $0.dueDate < $1.dueDate }
+    }
+
+    private func invoices(for kind: ReportKind) -> [Invoice] {
+        switch kind {
+        case .standard:
+            reportInvoices
+        case .unpaidChecklist:
+            unpaidChecklistInvoices
+        }
     }
 
     private struct ReportSummary {
@@ -348,20 +379,22 @@ struct ListInvoiceView: View {
         return formatter.string(from: value as NSNumber) ?? "NOK 0.00"
     }
 
-    private func exportReportPDF() {
-        let data = makeReportPDFData(invoices: reportInvoices)
+    private func exportReportPDF(kind: ReportKind) {
+        activeReportKind = kind
+        let data = makeReportPDFData(invoices: invoices(for: kind), kind: kind)
         guard let url = writeReportPDF(data: data) else { return }
         reportShareURL = url
         showShareSheet = true
     }
 
-    private func previewReport() {
-        reportPDFData = makeReportPDFData(invoices: reportInvoices)
+    private func previewReport(kind: ReportKind) {
+        activeReportKind = kind
+        reportPDFData = makeReportPDFData(invoices: invoices(for: kind), kind: kind)
         showReportPreview = true
     }
 
-    private func saveReportToFiles() {
-        let data = makeReportPDFData(invoices: reportInvoices)
+    private func saveReportToFiles(kind: ReportKind) {
+        let data = makeReportPDFData(invoices: invoices(for: kind), kind: kind)
         guard let url = writeReportPDF(data: data) else { return }
         reportShareURL = url
         showShareSheet = false
@@ -379,10 +412,11 @@ struct ListInvoiceView: View {
         }
     }
 
-    private func printReport() {
-        let data = makeReportPDFData(invoices: reportInvoices)
+    private func printReport(kind: ReportKind) {
+        activeReportKind = kind
+        let data = makeReportPDFData(invoices: invoices(for: kind), kind: kind)
         let printInfo = UIPrintInfo(dictionary: nil)
-        printInfo.jobName = "Invoice Report"
+        printInfo.jobName = kind == .unpaidChecklist ? "Ubetalte poster" : "Bilagsrapport"
         printInfo.outputType = .general
         let controller = UIPrintInteractionController.shared
         controller.printInfo = printInfo
@@ -390,7 +424,7 @@ struct ListInvoiceView: View {
         controller.present(animated: true, completionHandler: nil)
     }
 
-    private func makeReportPDFData(invoices: [Invoice]) -> Data {
+    private func makeReportPDFData(invoices: [Invoice], kind: ReportKind) -> Data {
         let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792)
         let margin: CGFloat = 36
         let contentWidth = pageRect.width - (margin * 2)
@@ -404,14 +438,9 @@ struct ListInvoiceView: View {
         let footerFont = UIFont.systemFont(ofSize: 9)
         let footerHeight: CGFloat = 24
 
-        let columnWidths: [CGFloat] = [
-            90,  // Date
-            170, // Title (allows wrapping)
-            90,  // Amount
-            70,  // State
-           
-            max(0, contentWidth - (90 + 170 + 90 + 70)) // Customer (wider)
-        ]
+        let columnWidths: [CGFloat] = kind == .unpaidChecklist
+            ? [28, 72, 145, 82, 82, max(0, contentWidth - (28 + 72 + 145 + 82 + 82))]
+            : [90, 170, 90, 70, max(0, contentWidth - (90 + 170 + 90 + 70))]
 
         return renderer.pdfData { context in
             var y = margin
@@ -512,10 +541,13 @@ struct ListInvoiceView: View {
 
             beginPageIfNeeded(56)
             drawSymbol(name: "chart.bar.doc.horizontal", size: 22, x: margin, y: y)
-            drawText("Min Konto Bilag Rapport", font: headerFont, rect: CGRect(x: margin + 28, y: y - 2, width: contentWidth - 28, height: headerFont.lineHeight + 4))
+            let reportTitle = kind == .unpaidChecklist ? "Ubetalte poster – sjekkliste" : "Min Konto Bilag Rapport"
+            drawText(reportTitle, font: headerFont, rect: CGRect(x: margin + 28, y: y - 2, width: contentWidth - 28, height: headerFont.lineHeight + 4))
             y += headerFont.lineHeight + 10
 
-            let metaText = "Generert: \(formatter.string(from: Date()))    Total: \(reportTotalString(for: invoices))    Antall: \(invoices.count)"
+            let metaText = kind == .unpaidChecklist
+                ? "Generert: \(formatter.string(from: Date()))    Antall ubetalte: \(invoices.count)"
+                : "Generert: \(formatter.string(from: Date()))    Total: \(reportTotalString(for: invoices))    Antall: \(invoices.count)"
             let metaHeight = textHeight(metaText, font: subHeaderFont, width: contentWidth)
             beginPageIfNeeded(metaHeight + 6)
             drawText(metaText, font: subHeaderFont, rect: CGRect(x: margin, y: y, width: contentWidth, height: metaHeight + 2))
@@ -524,17 +556,24 @@ struct ListInvoiceView: View {
             let sortField = sortPaid ? "Betalt Dato" : "Forfalls Dato"
             let sortOrder = orderDescending ? "Synkende" : "Stigende"
             let customerFilter = showFilteredCustomer ? (selectedCustomer?.title ?? "Alle Klienter") : "Alle Klienter"
-            let filterSummary = "Sortert: \(sortField) (\(sortOrder))    Klient: \(customerFilter)    Ubetalt: \(showUnpaid ? "Kunn" : "Innkludert")    Forfallt Ubetalt: \(showDueUnpaid ? "Ja" : "Nei")    Utvalg: \(formatter.string(from: fromDate)) – \(formatter.string(from: toDate))"
+            let filterSummary = kind == .unpaidChecklist
+                ? "Forfall: \(formatter.string(from: min(fromDate, toDate))) – \(formatter.string(from: max(fromDate, toDate)))    Alle kategorier"
+                : "Sortert: \(sortField) (\(sortOrder))    Klient: \(customerFilter)    Ubetalt: \(showUnpaid ? "Kun" : "Nei")    Forfalt ubetalt: \(showDueUnpaid ? "Ja" : "Nei")    Utvalg: \(formatter.string(from: fromDate)) – \(formatter.string(from: toDate))"
             let filterHeight = textHeight(filterSummary, font: metaFont, width: contentWidth)
             beginPageIfNeeded(filterHeight + 6)
             drawText(filterSummary, font: metaFont, rect: CGRect(x: margin, y: y, width: contentWidth, height: filterHeight + 2))
             y += filterHeight + 10
 
-            drawRow(cells: ["Dato", "Tittel", "Beløp", "Status", "Klient"], font: tableHeaderFont, isHeader: true)
+            let headerCells = kind == .unpaidChecklist
+                ? ["✓", "Forfall", "Tittel", "Beløp", "Type", "Kategori"]
+                : ["Dato", "Tittel", "Beløp", "Status", "Klient"]
+            drawRow(cells: headerCells, font: tableHeaderFont, isHeader: true)
 
             for invoice in invoices {
                 let customerName = invoice.customer?.title ?? "-"
-                let dateString = sortPaid ? invoice.displayPaidDate : invoice.displayDueDate
+                let dateString = kind == .unpaidChecklist
+                    ? invoice.displayDueDate
+                    : (sortPaid ? invoice.displayPaidDate : invoice.displayDueDate)
                 let amountColor: UIColor
                 switch invoice.type {
                 case .income:
@@ -544,32 +583,27 @@ struct ListInvoiceView: View {
                 case .all:
                     amountColor = .black
                 }
-                let rowColors: [UIColor] = [
-                    .black,
-                    .black,
-                    amountColor,
-                    .black,
-                    .black
-                ]
+                let rowColors: [UIColor] = kind == .unpaidChecklist
+                    ? [.black, .black, .black, amountColor, .black, .black]
+                    : [.black, .black, amountColor, .black, .black]
+                let cells = kind == .unpaidChecklist
+                    ? ["☐", dateString, invoice.title, invoice.displayAmount, invoice.type.title, customerName]
+                    : [dateString, invoice.title, invoice.displayAmount, invoice.state.title, customerName]
                 drawRow(
-                    cells: [
-                        dateString,
-                        invoice.title,
-                        invoice.displayAmount,
-                        invoice.state.title,
-                        customerName
-                    ],
+                    cells: cells,
                     font: rowFont,
                     textColors: rowColors
                 )
             }
 
             let summary = reportSummary(for: invoices)
-            let summaryText = """
-            Oppsummering
-            Inntekt mottatt: \(reportCurrencyString(summary.incomePaid))    Inntekt venter: \(reportCurrencyString(summary.incomeUnpaid))
-            Utgift betalt: \(reportCurrencyString(summary.expensePaid))    Utgift ubetalt: \(reportCurrencyString(summary.expenseUnpaid))
-            """
+            let summaryText = kind == .unpaidChecklist
+                ? "Totalt ubetalt: \(reportCurrencyString(invoices.reduce(0) { $0 + $1.amount }))    Antall: \(invoices.count)"
+                : """
+                Oppsummering
+                Inntekt mottatt: \(reportCurrencyString(summary.incomePaid))    Inntekt venter: \(reportCurrencyString(summary.incomeUnpaid))
+                Utgift betalt: \(reportCurrencyString(summary.expensePaid))    Utgift ubetalt: \(reportCurrencyString(summary.expenseUnpaid))
+                """
             let summaryHeight = textHeight(summaryText, font: metaFont, width: contentWidth)
             beginPageIfNeeded(summaryHeight + 6)
             drawText(summaryText, font: metaFont, rect: CGRect(x: margin, y: y, width: contentWidth, height: summaryHeight + 2))
